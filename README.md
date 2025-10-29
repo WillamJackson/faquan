@@ -110,12 +110,134 @@ curl https://<云托管服务域名>/api/count
 curl -X POST -H 'content-type: application/json' -d '{"action": "inc"}' https://<云托管服务域名>/api/count
 ```
 
+### `GET /api/db/health`
+
+数据库健康检查，返回数据库可用性与连接信息。
+
+#### 响应结果
+
+- `code`: 错误码（0 为成功）
+- `data.healthy`: 是否健康
+- `data.database`: 数据库名
+- `data.address`: 数据库地址
+
+#### 调用示例
+
+```
+curl https://<云托管服务域名>/api/db/health
+```
+
+### `GET /api/storage/cos/health`
+
+COS 对象存储健康检查，返回存储桶可用性与基础访问域名。
+
+#### 响应结果
+
+- `code`: 错误码（0 为成功）
+- `data.healthy`: 是否健康
+- `data.bucket`: 存储桶名称
+- `data.region`: 存储桶地域
+- `data.base_url`: 访问基础域名
+
+#### 调用示例
+
+```
+curl https://<云托管服务域名>/api/storage/cos/health
+```
+
+### `POST /api/storage/upload`
+
+上传文件到 COS。请求格式：`multipart/form-data`
+
+#### 请求参数
+
+- `file`: 文件内容（二进制，必填）
+- `key`: 目标对象键（可选，未提供时自动生成）
+
+#### 响应结果
+
+- `code`: 错误码（0 为成功）
+- `data.key`: 对象键
+- `data.url`: 公网访问 URL（若配置了公开访问域名）
+
+#### 调用示例
+
+```
+curl -X POST \
+  -F "file=@/path/to/local.png" \
+  -F "key=uploads/20250101/test.png" \
+  https://<云托管服务域名>/api/storage/upload
+```
+
 ## 使用注意
 如果不是通过微信云托管控制台部署模板代码，而是自行复制/下载模板代码后，手动新建一个服务并部署，需要在「服务设置」中补全以下环境变量，才可正常使用，否则会引发无法连接数据库，进而导致部署失败。
 - MYSQL_ADDRESS
 - MYSQL_PASSWORD
 - MYSQL_USERNAME
+- MYSQL_DBNAME（可选，默认 `flask_demo`）
 以上三个变量的值请按实际情况填写。如果使用云托管内MySQL，可以在控制台MySQL页面获取相关信息。
+
+此外，如需启用 COS 上传与健康检查，请在「服务设置」中补全下列对象存储相关环境变量：
+
+- COS_BUCKET：如 `7072-prod-8gd9pf8aaa4c364f-1256841508`
+- COS_REGION：如 `ap-shanghai`
+- COS_SECRET_ID：腾讯云访问密钥 SecretId
+- COS_SECRET_KEY：腾讯云访问密钥 SecretKey
+
+当全部 COS 变量配置完成后，可调用 `/api/storage/cos/health` 验证可用性，并使用 `/api/storage/upload` 上传文件。
+
+### 云托管最佳实践：临时密钥 + 元数据
+
+为满足小程序直传回读的安全与可控性，推荐开启“临时密钥 + 元数据”模式（纯 STS，无需永久密钥）：
+
+- 环境变量（服务设置）
+  - 基本：`COS_BUCKET`、`COS_REGION`
+  - 启用 STS：`COS_USE_STS=true`
+  - STS 获取方式（二选一）：
+    - 方式 A（静态注入，便于本地调试）：`COS_TMP_SECRET_ID`、`COS_TMP_SECRET_KEY`、`COS_TOKEN`
+    - 方式 B（动态拉取，生产推荐）：`CLOUDRUN_STS_URL=<开放接口完整URL>` 或 `CLOUDRUN_OPEN_SERVICE_BASE=https://<服务域名>`（默认路径将使用 `/_/cos/getauthorization`）
+  - 元数据生成：`CLOUDRUN_METAID_URL=<开放接口完整URL>` 或 `CLOUDRUN_OPEN_SERVICE_BASE=https://<服务域名>`（默认路径将使用 `/_/cos/metaid/encode`）
+
+- 上传接口调用（需携带用户 `openid`）
+
+```
+curl -X POST \
+  -H "x-wx-openid: <用户openid>" \
+  -F "file=@/path/to/local.png" \
+  https://<服务域名>/api/storage/upload
+```
+
+- 响应示例（开启元数据时返回 `metaid`，并写入 `x-cos-meta-fileid`）
+
+```json
+{
+  "code": 0,
+  "data": {
+    "key": "uploads/20250101/<uuid>-local.png",
+    "url": "https://<bucket>.cos.<region>.myqcloud.com/uploads/20250101/<uuid>-local.png",
+    "metaid": "k1Z..."  
+  }
+}
+```
+
+- 获取 STS 临时秘钥：通过云托管开放接口服务（“获取临时秘钥”）即可，无需永久密钥。
+  - 若配置动态拉取（`CLOUDRUN_STS_URL` 或 `CLOUDRUN_OPEN_SERVICE_BASE`），后端会自动缓存并续期（过期前 60s 刷新）。
+  - 若未配置 `CLOUDRUN_METAID_URL`/`CLOUDRUN_OPEN_SERVICE_BASE` 或未携带 `openid`，上传仍可成功，但不会写入 `x-cos-meta-fileid`。
+
+
+## 数据库表结构（DDL）
+- 位置：`docs/db-ddl.sql`
+- 说明：默认创建并使用数据库 `flask_demo`；如需自定义库名，请修改文件开头的 `USE` 语句为你的 `MYSQL_DBNAME`。
+
+### 本地执行示例（Windows）
+- 使用命令行导入（需安装 `mysql` 客户端）：
+  - `mysql -h127.0.0.1 -P3306 -uroot -p < docs\db-ddl.sql`
+  - 将主机、端口、用户名按你的本地 MySQL 实际配置替换。
+
+### 云托管 MySQL（控制台）
+- 进入云托管的 MySQL 控制台，选择对应数据库，使用「导入 SQL 文件」或控制台查询窗口执行 `docs/db-ddl.sql` 的内容。
+- 与环境变量一致后，后端可通过 `GET /api/db/health` 验证连接：
+  - `curl http(s)://<服务域名>/api/db/health`
 
 
 
